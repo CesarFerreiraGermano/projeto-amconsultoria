@@ -215,14 +215,18 @@ def gerar_xte_do_excel(excel_file):
         cabecalho = ET.SubElement(root, "ans:cabecalho")
         linha_cabecalho = df_origem.iloc[0]
 
+        # data_atual = datetime.now().strftime("%Y-%m-%d")
+        # hora_atual = datetime.now().strftime("%H:%M:%S")
+
+
         identificacaoTransacao = ET.SubElement(cabecalho, "ans:identificacaoTransacao")
         sub(identificacaoTransacao, "tipoTransacao", "MONITORAMENTO")
 
         # --- Corrigido: Pegando dados corretos da planilha
         sub(identificacaoTransacao, "numeroLote", linha_cabecalho.get("numeroLote"))
         sub(identificacaoTransacao, "competenciaLote", linha_cabecalho.get("competenciaLote"))
-        sub(identificacaoTransacao, "dataRegistroTransacao", linha_cabecalho.get("dataRegistroTransacao"), is_date=True)
-        sub(identificacaoTransacao, "horaRegistroTransacao", linha_cabecalho.get("horaRegistroTransacao"))
+        sub(identificacaoTransacao, "dataRegistroTransacao", data_atual, is_date=True)
+        sub(identificacaoTransacao, "horaRegistroTransacao", hora_atual)
 
         sub(cabecalho, "registroANS", linha_cabecalho.get("registroANS"))
         sub(cabecalho, "versaoPadrao", linha_cabecalho.get("versaoPadrao", "1.04.01"))
@@ -413,6 +417,14 @@ elif menu == "Converter Excel para XTE/XML":
     if excel_file:
         st.info("🔄 Processando o arquivo...")
 
+        import pytz
+        fuso_horario_brasil = pytz.timezone('America/Sao_Paulo')
+        datetime_brasil = datetime.now(fuso_horario_brasil)
+        data_atual = datetime_brasil.strftime("%Y-%m-%d")
+        hora_atual = datetime_brasil.strftime("%H:%M:%S")
+            
+        # Informar ao usuário a data/hora que será usada
+        st.info(f"📅 Data e hora da geração: {datetime_brasil.strftime('%d/%m/%Y %H:%M:%S')} (Horário de Brasília)")
         try:
             with st.spinner("Gerando arquivos..."):
                 updated_files = gerar_xte_do_excel(excel_file)
