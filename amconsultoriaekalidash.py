@@ -103,6 +103,9 @@ def parse_xte(file):
                     'ans:identProcedimento/ans:codigoTabela',
                     namespaces=ns
                 ) or '').strip()
+                # ADICIONE ISSO APÓS OS OUTROS CAMPOS DO PROCEDIMENTO:
+                proc_data['registroANSOperadoraIntermediaria'] = (proc.findtext('ans:registroANSOperadoraIntermediaria', namespaces=ns) or '').strip()
+                proc_data['tipoAtendimentoOperadoraIntermediaria'] = (proc.findtext('ans:tipoAtendimentoOperadoraIntermediaria', namespaces=ns) or '').strip()
 
                 all_data.append(proc_data)
         else:
@@ -149,7 +152,11 @@ def remove_duplicate_columns(df):
 def gerar_xte_do_excel(excel_file):
     ns = "http://www.ans.gov.br/padroes/tiss/schemas"
 
-    if excel_file.name.endswith('.csv'):
+    # Obtém data/hora ATUAL no momento da geração
+    data_atual = datetime.now().strftime("%Y-%m-%d")
+    hora_atual = datetime.now().strftime("%H:%M:%S")
+
+    if hasattr(excel_file, 'name') and excel_file.name.endswith('.csv'): # Checa se tem o atributo 'name'
         df = pd.read_csv(excel_file, dtype=str, sep=';')
     else:
         df = pd.read_excel(excel_file, dtype=str)
@@ -157,39 +164,55 @@ def gerar_xte_do_excel(excel_file):
     def formatar_data_iso(valor):
         if pd.isna(valor):
             return ""
-        if isinstance(valor, datetime):
+        if isinstance(valor, datetime): # Se já for datetime (improvável do Excel como str)
             return valor.strftime("%Y-%m-%d")
         valor_str = str(valor).strip()
         if valor_str == "":
             return ""
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+        
+        # Tenta formatos comuns de data
+        for fmt in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
             try:
-                parsed = datetime.strptime(valor_str, fmt)
-                return parsed.strftime("%Y-%m-%d")
+                parsed_datetime = datetime.strptime(valor_str, fmt)
+                return parsed_datetime.strftime("%Y-%m-%d")
             except ValueError:
                 continue
+        
+        # Tenta converter de número serial do Excel se for um número
         try:
-            serial = float(valor_str)
-            base = datetime(1899, 12, 30)
-            return (base + pd.to_timedelta(serial, unit="D")).strftime("%Y-%m-%d")
-        except:
-            return ""
+            # Verifica se é um número (pode ser float com .0)
+            if valor_str.replace('.', '', 1).isdigit():
+                serial = float(valor_str)
+                # A data base do Excel é 30/12/1899 para números seriais
+                base_date = datetime(1899, 12, 30)
+                delta = pd.to_timedelta(serial, unit='D')
+                return (base_date + delta).strftime("%Y-%m-%d")
+        except ValueError:
+            pass # Não é um número serial válido ou float simples
+
+        return valor_str # Retorna o valor original se não conseguir parsear como data conhecida
+
 
     def sub(parent, tag, value, is_date=False):
         if is_date:
             value = formatar_data_iso(value)
+        
         text = "" if pd.isna(value) else str(value).strip()
-        if text:
+        
+        # Adiciona o elemento apenas se o texto não estiver vazio OU se a tag for obrigatória (lógica não implementada aqui)
+        # Para simplificar, vamos adicionar se text não for vazio. Se alguma tag vazia for obrigatória pelo schema,
+        # esta lógica pode precisar de ajuste para enviar tags vazias (ex: <ans:tag></ans:tag>)
+        if text: 
             ET.SubElement(parent, f"ans:{tag}").text = text
 
     def extrair_texto(elemento):
         textos = []
         if elemento.text:
-            textos.append(elemento.text)
+            textos.append(elemento.text.strip()) # Adicionado strip() aqui também
         for filho in elemento:
             textos.extend(extrair_texto(filho))
             if filho.tail:
-                textos.append(filho.tail)
+                textos.append(filho.tail.strip()) # Adicionado strip() aqui também
         return textos
 
     arquivos_gerados = {}
@@ -203,112 +226,199 @@ def gerar_xte_do_excel(excel_file):
 
         agrupado = df_origem.groupby([
             "numeroGuia_prestador", "numeroGuia_operadora", "identificacaoReembolso"
-        ], dropna=False)
+        ], dropna=False) # dropna=False é importante para guias sem esses números
 
         root = ET.Element("ans:mensagemEnvioANS", attrib={
             "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
             "xmlns:xsd": "http://www.w3.org/2001/XMLSchema",
-            "xsi:schemaLocation": f"{ns} {ns}/tissMonitoramentoV1_04_01.xsd",
+            "xsi:schemaLocation": f"{ns} {ns}/tissMonitoramentoV1_04_01.xsd", # Hardcoded para a versão correta
             "xmlns:ans": ns
         })
 
         cabecalho = ET.SubElement(root, "ans:cabecalho")
-        linha_cabecalho = df_origem.iloc[0]
-
-        # data_atual = datetime.now().strftime("%Y-%m-%d")
-        # hora_atual = datetime.now().strftime("%H:%M:%S")
-
+        linha_cabecalho = df_origem.iloc[0] # Pega a primeira linha para dados do cabeçalho do lote/arquivo
 
         identificacaoTransacao = ET.SubElement(cabecalho, "ans:identificacaoTransacao")
-        sub(identificacaoTransacao, "tipoTransacao", "MONITORAMENTO")
-
-        # --- Corrigido: Pegando dados corretos da planilha
+        sub(identificacaoTransacao, "tipoTransacao", "MONITORAMENTO") # Conforme TISS Monitoramento
         sub(identificacaoTransacao, "numeroLote", linha_cabecalho.get("numeroLote"))
         sub(identificacaoTransacao, "competenciaLote", linha_cabecalho.get("competenciaLote"))
-        sub(identificacaoTransacao, "dataRegistroTransacao", data_atual, is_date=True)
-        sub(identificacaoTransacao, "horaRegistroTransacao", hora_atual)
+        sub(identificacaoTransacao, "dataRegistroTransacao", data_atual)  # Usa data atual da geração
+        sub(identificacaoTransacao, "horaRegistroTransacao", hora_atual)  # Usa hora atual da geração
 
         sub(cabecalho, "registroANS", linha_cabecalho.get("registroANS"))
-        sub(cabecalho, "versaoPadrao", linha_cabecalho.get("versaoPadrao", "1.04.01"))
+        sub(cabecalho, "versaoPadrao", linha_cabecalho.get("versaoPadrao", "1.04.01")) # Default para a versão do schema
 
         mensagem = ET.SubElement(root, "ans:Mensagem")
         op_ans = ET.SubElement(mensagem, "ans:operadoraParaANS")
 
-        for _, grupo in agrupado:
+        for _, grupo_guia_key in agrupado: # Iterando sobre cada grupo que representa uma guia
             guia = ET.SubElement(op_ans, "ans:guiaMonitoramento")
-            linha = grupo.iloc[0]
+            # linha_guia representa os dados principais da guia (primeira linha do agrupamento)
+            linha_guia = grupo_guia_key.iloc[0]
 
-            sub(guia, "tipoRegistro", linha.get("tipoRegistro"))
-            sub(guia, "versaoTISSPrestador", linha.get("versaoTISSPrestador"))
-            sub(guia, "formaEnvio", linha.get("formaEnvio"))
+            # Sequência de acordo com ct_monitoramentoGuia do XSD tissMonitoramentoV1_04_01.xsd
+            sub(guia, "tipoRegistro", linha_guia.get("tipoRegistro"))
+            sub(guia, "versaoTISSPrestador", linha_guia.get("versaoTISSPrestador"))
+            sub(guia, "formaEnvio", linha_guia.get("formaEnvio"))
 
-            contratado = ET.SubElement(guia, "ans:dadosContratadoExecutante")
-            for tag in ["CNES", "identificadorExecutante", "codigoCNPJ_CPF", "municipioExecutante"]:
-                sub(contratado, tag, linha.get(tag))
+            dadosContratadoExecutante_el = ET.SubElement(guia, "ans:dadosContratadoExecutante")
+            sub(dadosContratadoExecutante_el, "CNES", linha_guia.get("CNES"))
+            sub(dadosContratadoExecutante_el, "identificadorExecutante", linha_guia.get("identificadorExecutante"))
+            sub(dadosContratadoExecutante_el, "codigoCNPJ_CPF", linha_guia.get("codigoCNPJ_CPF"))
+            sub(dadosContratadoExecutante_el, "municipioExecutante", linha_guia.get("municipioExecutante"))
 
-            beneficiario = ET.SubElement(guia, "ans:dadosBeneficiario")
-            ident = ET.SubElement(beneficiario, "ans:identBeneficiario")
-            sub(ident, "numeroCartaoNacionalSaude", linha.get("numeroCartaoNacionalSaude"))
-            sub(ident, "cpfBeneficiario", linha.get("cpfBeneficiario"))
+            sub(guia, "registroANSOperadoraIntermediaria", linha_guia.get("registroANSOperadoraIntermediaria"))
+            sub(guia, "tipoAtendimentoOperadoraIntermediaria", linha_guia.get("tipoAtendimentoOperadoraIntermediaria"))
 
-            sexo = str(linha.get("sexo")).strip()
-            if sexo not in ["1", "3"]:
-                sexo = "1"
-            sub(ident, "sexo", sexo)
+            dadosBeneficiario_el = ET.SubElement(guia, "ans:dadosBeneficiario")
+            identBeneficiario_el = ET.SubElement(dadosBeneficiario_el, "ans:identBeneficiario")
+            sub(identBeneficiario_el, "numeroCartaoNacionalSaude", linha_guia.get("numeroCartaoNacionalSaude"))
+            sub(identBeneficiario_el, "cpfBeneficiario", linha_guia.get("cpfBeneficiario"))
+            sexo_val = str(linha_guia.get("sexo", "")).strip()
+            if sexo_val not in ["1", "3"] and sexo_val: # Se preenchido e inválido, TISS pode rejeitar. Ajuste conforme regra de negócio.
+                 sexo_val = "" # Ou um valor padrão, ou deixar em branco se o campo for opcional e puder ser vazio.
+            if sexo_val: # Só adiciona se tiver valor (1 ou 3)
+                 sub(identBeneficiario_el, "sexo", sexo_val)
+            sub(identBeneficiario_el, "dataNascimento", linha_guia.get("dataNascimento"), is_date=True)
+            sub(identBeneficiario_el, "municipioResidencia", linha_guia.get("municipioResidencia"))
+            sub(dadosBeneficiario_el, "numeroRegistroPlano", linha_guia.get("numeroRegistroPlano"))
 
-            sub(ident, "dataNascimento", linha.get("dataNascimento"), is_date=True)
-            sub(ident, "municipioResidencia", linha.get("municipioResidencia"))
-            sub(beneficiario, "numeroRegistroPlano", linha.get("numeroRegistroPlano"))
+            sub(guia, "tipoEventoAtencao", linha_guia.get("tipoEventoAtencao"))
+            sub(guia, "origemEventoAtencao", linha_guia.get("origemEventoAtencao"))
+            sub(guia, "numeroGuia_prestador", linha_guia.get("numeroGuia_prestador"))
+            sub(guia, "numeroGuia_operadora", linha_guia.get("numeroGuia_operadora"))
+            sub(guia, "identificacaoReembolso", linha_guia.get("identificacaoReembolso"))
+            sub(guia, "identificacaoValorPreestabelecido", linha_guia.get("identificacaoValorPreestabelecido"))
 
-            for tag in ["tipoEventoAtencao", "origemEventoAtencao", "numeroGuia_prestador",
-                        "numeroGuia_operadora", "identificacaoReembolso"]:
-                sub(guia, tag, linha.get(tag))
+            # formasRemuneracao (maxOccurs="unbounded") - Adapte se houver múltiplas no Excel para a mesma guia
+            if pd.notna(linha_guia.get("formaRemuneracao")) or pd.notna(linha_guia.get("valorRemuneracao")):
+                formasRemuneracao_el = ET.SubElement(guia, "ans:formasRemuneracao")
+                sub(formasRemuneracao_el, "formaRemuneracao", linha_guia.get("formaRemuneracao"))
+                sub(formasRemuneracao_el, "valorRemuneracao", linha_guia.get("valorRemuneracao"))
+            
+            sub(guia, "guiaSolicitacaoInternacao", linha_guia.get("guiaSolicitacaoInternacao"))
+            sub(guia, "dataSolicitacao", linha_guia.get("dataSolicitacao"), is_date=True)
+            sub(guia, "numeroGuiaSPSADTPrincipal", linha_guia.get("numeroGuiaSPSADTPrincipal"))
+            sub(guia, "dataAutorizacao", linha_guia.get("dataAutorizacao"), is_date=True)
+            sub(guia, "dataRealizacao", linha_guia.get("dataRealizacao"), is_date=True)
+            sub(guia, "dataInicialFaturamento", linha_guia.get("dataInicialFaturamento"), is_date=True)
+            sub(guia, "dataFimPeriodo", linha_guia.get("dataFimPeriodo"), is_date=True)
+            sub(guia, "dataProtocoloCobranca", linha_guia.get("dataProtocoloCobranca"), is_date=True)
+            sub(guia, "dataPagamento", linha_guia.get("dataPagamento"), is_date=True)
+            sub(guia, "dataProcessamentoGuia", linha_guia.get("dataProcessamentoGuia"), is_date=True)
+            
+            sub(guia, "tipoConsulta", linha_guia.get("tipoConsulta"))
+            sub(guia, "cboExecutante", linha_guia.get("cboExecutante"))
+            sub(guia, "indicacaoRecemNato", linha_guia.get("indicacaoRecemNato"))
+            sub(guia, "indicacaoAcidente", linha_guia.get("indicacaoAcidente"))
+            sub(guia, "caraterAtendimento", linha_guia.get("caraterAtendimento"))
+            sub(guia, "tipoInternacao", linha_guia.get("tipoInternacao"))
+            sub(guia, "regimeInternacao", linha_guia.get("regimeInternacao"))
 
-            formas = ET.SubElement(guia, "ans:formasRemuneracao")
-            sub(formas, "formaRemuneracao", linha.get("formaRemuneracao"))
-            sub(formas, "valorRemuneracao", linha.get("valorRemuneracao"))
+            # diagnosticosCID10 (contém diagnosticoCID maxOccurs="4")
+            # Adapte se houver múltiplas colunas CID (ex: diagnosticoCID1, diagnosticoCID2) no Excel
+            cid_principal = linha_guia.get("diagnosticoCID") # Ou o nome da sua coluna principal de CID
+            if pd.notna(cid_principal):
+                diagnosticosCID10_el = ET.SubElement(guia, "ans:diagnosticosCID10")
+                sub(diagnosticosCID10_el, "diagnosticoCID", cid_principal)
+                # Exemplo para CIDs adicionais, se existirem colunas:
+                # for i in range(2, 5): # Para diagnosticoCID2, diagnosticoCID3, diagnosticoCID4
+                #     cid_adicional = linha_guia.get(f"diagnosticoCID{i}")
+                #     if pd.notna(cid_adicional):
+                #         sub(diagnosticosCID10_el, "diagnosticoCID", cid_adicional)
+            
+            sub(guia, "tipoAtendimento", linha_guia.get("tipoAtendimento"))
+            sub(guia, "regimeAtendimento", linha_guia.get("regimeAtendimento"))
+            sub(guia, "saudeOcupacional", linha_guia.get("saudeOcupacional"))
+            sub(guia, "tipoFaturamento", linha_guia.get("tipoFaturamento"))
+            sub(guia, "diariasAcompanhante", linha_guia.get("diariasAcompanhante"))
+            sub(guia, "diariasUTI", linha_guia.get("diariasUTI"))
+            sub(guia, "motivoSaida", linha_guia.get("motivoSaida"))
 
-            for tag in ["dataAutorizacao", "dataRealizacao", "dataProtocoloCobranca", "dataPagamento",
-                        "dataProcessamentoGuia", "indicacaoRecemNato", "indicacaoAcidente",
-                        "caraterAtendimento", "tipoInternacao", "regimeInternacao",
-                        "tipoFaturamento", "motivoSaida"]:
-                if tag in linha:
-                    sub(guia, tag, linha.get(tag), is_date=("data" in tag.lower()))
+            valoresGuia_el = ET.SubElement(guia, "ans:valoresGuia")
+            tags_valores_guia = [
+                "valorTotalInformado", "valorProcessado", "valorTotalPagoProcedimentos",
+                "valorTotalDiarias", "valorTotalTaxas", "valorTotalMateriais",
+                "valorTotalOPME", "valorTotalMedicamentos", "valorGlosaGuia",
+                "valorPagoGuia", "valorPagoFornecedores", "valorTotalTabelaPropria",
+                "valorTotalCoParticipacao"
+            ]
+            for tag_vg in tags_valores_guia:
+                sub(valoresGuia_el, tag_vg, linha_guia.get(tag_vg))
 
-            valores = ET.SubElement(guia, "ans:valoresGuia")
-            for tag in ["valorTotalInformado", "valorProcessado", "valorTotalPagoProcedimentos",
-                        "valorTotalDiarias", "valorTotalTaxas", "valorTotalMateriais",
-                        "valorTotalOPME", "valorTotalMedicamentos", "valorGlosaGuia",
-                        "valorPagoGuia", "valorPagoFornecedores", "valorTotalTabelaPropria",
-                        "valorTotalCoParticipacao"]:
-                sub(valores, tag, linha.get(tag))
+            # declaracaoNascido (maxOccurs="8") - Adapte para múltiplas ocorrências
+            sub(guia, "declaracaoNascido", linha_guia.get("declaracaoNascido"))
+            # declaracaoObito (maxOccurs="8") - Adapte para múltiplas ocorrências
+            sub(guia, "declaracaoObito", linha_guia.get("declaracaoObito"))
 
-            for _, proc in grupo.iterrows():
-                procedimento = ET.SubElement(guia, "ans:procedimentos")
-                ident_proc = ET.SubElement(procedimento, "ans:identProcedimento")
-                sub(ident_proc, "codigoTabela", proc.get("codigoTabela"))
-                proc_node = ET.SubElement(ident_proc, "ans:Procedimento")
-                if proc.get("grupoProcedimento"):
-                    sub(proc_node, "grupoProcedimento", proc.get("grupoProcedimento"))
-                sub(proc_node, "codigoProcedimento", proc.get("codigoProcedimento"))
+            # Loop para os procedimentos da guia
+            for _, proc_linha in grupo_guia_key.iterrows(): # Itera sobre todas as linhas do grupo (cada linha é um procedimento)
+                procedimentos_el = ET.SubElement(guia, "ans:procedimentos")
+                
+                identProcedimento_el = ET.SubElement(procedimentos_el, "ans:identProcedimento")
+                sub(identProcedimento_el, "codigoTabela", proc_linha.get("codigoTabela"))
+                Procedimento_el = ET.SubElement(identProcedimento_el, "ans:Procedimento")
+                # No XSD é uma choice: grupoProcedimento OU codigoProcedimento. Assumindo que ambos podem estar no Excel
+                # e a lógica do 'sub' adicionará o que estiver presente. Se só um é permitido, ajuste.
+                if pd.notna(proc_linha.get("grupoProcedimento")):
+                    sub(Procedimento_el, "grupoProcedimento", proc_linha.get("grupoProcedimento"))
+                else: # Garante que ou grupo ou código seja enviado se um deles existir
+                    sub(Procedimento_el, "codigoProcedimento", proc_linha.get("codigoProcedimento"))
+                
+                # denteRegiao (complex choice) e denteFace - Adicionar lógica se usar odontologia
+                # Exemplo:
+                # if pd.notna(proc_linha.get("codDente")) or pd.notna(proc_linha.get("codRegiao")):
+                #    denteRegiao_el = ET.SubElement(procedimentos_el, "ans:denteRegiao")
+                #    if pd.notna(proc_linha.get("codDente")):
+                #        sub(denteRegiao_el, "codDente", proc_linha.get("codDente"))
+                #    else:
+                #        sub(denteRegiao_el, "codRegiao", proc_linha.get("codRegiao"))
+                # sub(procedimentos_el, "denteFace", proc_linha.get("denteFace"))
 
-                for tag in ["quantidadeInformada", "valorInformado", "quantidadePaga", "unidadeMedida",
-                            "valorPagoProc", "valorPagoFornecedor", "valorCoParticipacao"]:
-                    sub(procedimento, tag, proc.get(tag))
+                sub(procedimentos_el, "quantidadeInformada", proc_linha.get("quantidadeInformada"))
+                sub(procedimentos_el, "valorInformado", proc_linha.get("valorInformado"))
+                sub(procedimentos_el, "quantidadePaga", proc_linha.get("quantidadePaga"))
+                sub(procedimentos_el, "unidadeMedida", proc_linha.get("unidadeMedida"))
+                sub(procedimentos_el, "valorPagoProc", proc_linha.get("valorPagoProc"))
+                sub(procedimentos_el, "valorPagoFornecedor", proc_linha.get("valorPagoFornecedor"))
+                sub(procedimentos_el, "CNPJFornecedor", proc_linha.get("CNPJFornecedor")) # Adicionado conforme XSD
+                sub(procedimentos_el, "valorCoParticipacao", proc_linha.get("valorCoParticipacao"))
+                
+                # detalhePacote (maxOccurs="unbounded") - Adicionar lógica se usar pacotes
+                
+                # Campos de Operadora Intermediária DENTRO de cada procedimento (conforme seu script V2)
+                sub(procedimentos_el, "registroANSOperadoraIntermediaria", proc_linha.get("registroANSOperadoraIntermediaria"))
+                sub(procedimentos_el, "tipoAtendimentoOperadoraIntermediaria", proc_linha.get("tipoAtendimentoOperadoraIntermediaria"))
 
-        conteudo = ''.join(extrair_texto(cabecalho) + extrair_texto(mensagem))
-        hash_value = hashlib.md5(conteudo.encode('iso-8859-1')).hexdigest()
+        # Hash e Epílogo (fora do loop de guias, uma vez por arquivo)
+        # É importante que extrair_texto seja chamado APÓS todo o conteúdo de <cabecalho> e <Mensagem> ser construído
+        # Limpa qualquer texto ou cauda do elemento root antes de adicionar o epílogo, se necessário
+        root.text = None 
+        root.tail = None
+        
+        # A função extrair_texto precisa ser robusta para não pegar texto fora de cabecalho e mensagem
+        # Vamos assumir que ela pega apenas o conteúdo textual desses dois filhos diretos de root
+        conteudo_cabecalho = ''.join(extrair_texto(cabecalho))
+        conteudo_mensagem = ''.join(extrair_texto(mensagem))
+        conteudo_para_hash = conteudo_cabecalho + conteudo_mensagem
+        
+        hash_value = hashlib.md5(conteudo_para_hash.encode('iso-8859-1')).hexdigest()
 
         epilogo = ET.SubElement(root, "ans:epilogo")
         ET.SubElement(epilogo, "ans:hash").text = hash_value
 
-        final_xml = ET.tostring(root, encoding="utf-8")
-        final_pretty = minidom.parseString(final_xml).toprettyxml(indent="  ", encoding="iso-8859-1")
-
+        # Prettify XML
+        # ET.indent(root) # Para Python 3.9+
+        xml_string = ET.tostring(root, encoding="utf-8", method="xml")
+        dom = minidom.parseString(xml_string)
+        final_pretty = dom.toprettyxml(indent="  ", encoding="iso-8859-1")
+        
+        # Limpa nome do arquivo para evitar caracteres inválidos
         nome_base, _ = os.path.splitext(nome_arquivo)
-        nome_limpo = re.sub(r'[^a-zA-Z0-9_\-]', '_', nome_base)
+        nome_limpo = re.sub(r'[^a-zA-Z0-9_\-]', '_', nome_base) # Garante nome de arquivo válido
+        
         arquivos_gerados[f"{nome_limpo}.xml"] = final_pretty
-        arquivos_gerados[f"{nome_limpo}.xte"] = final_pretty
+        arquivos_gerados[f"{nome_limpo}.xte"] = final_pretty # XTE e XML com mesmo conteúdo
 
     return arquivos_gerados
 
@@ -417,14 +527,6 @@ elif menu == "Converter Excel para XTE/XML":
     if excel_file:
         st.info("🔄 Processando o arquivo...")
 
-        import pytz
-        fuso_horario_brasil = pytz.timezone('America/Sao_Paulo')
-        datetime_brasil = datetime.now(fuso_horario_brasil)
-        data_atual = datetime_brasil.strftime("%Y-%m-%d")
-        hora_atual = datetime_brasil.strftime("%H:%M:%S")
-            
-        # Informar ao usuário a data/hora que será usada
-        st.info(f"📅 Data e hora da geração: {datetime_brasil.strftime('%d/%m/%Y %H:%M:%S')} (Horário de Brasília)")
         try:
             with st.spinner("Gerando arquivos..."):
                 updated_files = gerar_xte_do_excel(excel_file)
